@@ -1,0 +1,51 @@
+{
+  "rows": 82138753,
+  "distinct_flights": 5999739,
+  "routes": 235,
+  "search_dates": [
+    "2022-04-16",
+    "2022-10-05"
+  ],
+  "flight_dates": [
+    "2022-04-17",
+    "2022-11-19"
+  ],
+  "max_days_to_departure": 60,
+  "null_counts": {
+    "legId": 0,
+    "searchDate": 0,
+    "flightDate": 0,
+    "origin": 0,
+    "destination": 0,
+    "totalFare": 0
+  },
+  "bad_rows": {
+    "non_positive_fare": 0,
+    "searched_after_departure": 0
+  },
+  "basic_economy_share": 0.14396695308973098,
+  "fares_per_flight_day": 1.0000158027784036,
+  "search_days_per_flight": {
+    "median": 6.0,
+    "p10": 1.0,
+    "p90": 42.0,
+    "share_seen_2_plus_days": 0.7858190164605494,
+    "share_seen_7_plus_days": 0.48537894731754166
+  },
+  "share_of_flights_whose_price_changed": 0.6859871737753925,
+  "flights_with_valid_fare": 5999739,
+  "missing_search_days": [
+    "2022-05-15",
+    "2022-05-16"
+  ],
+  "rows_by_days_to_departure": {
+    "0": 0,
+    "1-7": 11940894,
+    "8-14": 11397520,
+    "15-30": 24335866,
+    "31-45": 21199852,
+    "46-60": 13264621,
+    "61-90": 0,
+    "91-100000": 0
+  }
+}

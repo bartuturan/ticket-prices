@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ticket-prices"
+version = "0.1.0"
+description = "Decide when to buy plane tickets from historical fare quotes."
+requires-python = ">=3.11"
+dependencies = ["duckdb", "pandas", "pyarrow", "matplotlib", "lightgbm"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ipykernel", "nbclient", "nbconvert", "nbformat"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

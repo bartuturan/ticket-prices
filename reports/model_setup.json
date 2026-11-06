@@ -1,0 +1,23 @@
+{
+  "split_date": "2022-07-28",
+  "primary_model": "lightgbm",
+  "margins": {
+    "lightgbm": 0.0,
+    "linear": 0.0
+  },
+  "train_rows": 848801,
+  "test_trips": 9040,
+  "test_departure_dates": 39,
+  "mean_bought_at": {
+    "lightgbm": 19.55995575221239,
+    "linear": 19.137278761061946
+  },
+  "share_bought_first_day": {
+    "lightgbm": 0.2204646017699115,
+    "linear": 0.2336283185840708
+  },
+  "bad_case_check": {
+    "share_within_bad_case": 0.7655973451327434,
+    "mean_bad_case_ratio": 1.0478382892600235
+  }
+}

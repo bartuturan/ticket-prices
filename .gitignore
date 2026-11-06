@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# The 31 GB Expedia download and everything built from it. See README.md for how to recreate it.
+data/
+
+# Claude Code's local settings
+.claude/
+
+# The scraper is its own repository, with its own GitHub remote.
+germany-flight-fares/
