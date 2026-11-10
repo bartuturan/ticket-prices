@@ -1,0 +1,35 @@
+{
+  "weeks": [
+    "2022-06-06",
+    "2022-06-13",
+    "2022-06-20",
+    "2022-06-27",
+    "2022-07-04",
+    "2022-07-11",
+    "2022-07-18",
+    "2022-07-25",
+    "2022-08-01",
+    "2022-08-08",
+    "2022-08-15",
+    "2022-08-22",
+    "2022-08-29"
+  ],
+  "windows": [
+    28,
+    14
+  ],
+  "headline_variant": "shift_28",
+  "num_leaves": 31,
+  "rounds": 100,
+  "min_drop_pct": 0.05,
+  "min_drop_abs": 3.0,
+  "scored_decisions": 540319,
+  "evidence": "development: the replay covers the period the final dip-model test used",
+  "pass_mark": {
+    "if_log_loss_gain_ci_low": 0.10257910771380743,
+    "when_log_loss_gain_ci_low": 0.10670432993314795,
+    "max_calibration_gap": 0.16096580690764217,
+    "calibration_tolerance": 0.05,
+    "passed": false
+  }
+}

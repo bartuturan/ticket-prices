@@ -145,6 +145,176 @@ accumulate.
 reads parquet through DuckDB when that happens. Four tests in `test_prepare_and_checks.py` fail
 for the same reason.
 
+## Dip-timing model
+
+Predicts, on any shopping day, whether a fare you could still buy appears below today's
+price before departure (the "if" forecast) and on which day (the "when" forecast). It is a
+separate model from the buy-or-wait one: it shares only the Expedia data and features. It needs
+`series` and `features` to have run.
+
+```bash
+.venv/Scripts/python -I -m ticket_prices.cli dip-tune
+.venv/Scripts/python -I -m ticket_prices.cli dip-final
+```
+
+`dip-final` refuses to run twice, like `final` (`--allow-rerun` overrides). `--min-drop-pct`
+and `--min-drop-abs` set what counts as a dip, and `dip-final` checks that `dip-tune` used the
+same values.
+
+- **Decision:** a trip (route and departure date) on one shopping day from 30 to 2 days out,
+  with its price that day.
+- **Catchable dip:** a later day whose quote is at least 5% and 3 units below the decision's
+  price, where the price a buyer pays one quoted day later is also that far below. A dip that
+  rebounds the next day doesn't count. The last buying day has no later day, so it keeps its
+  own price. A later day with no quote is not a dip.
+- **Model:** one LightGBM classifier gives the chance that the first catchable dip lands on
+  day `k`, given none landed earlier. Inputs are the 20 features from `features.py` at the
+  decision, plus the decision's lead and the days ahead. Training rows run from the day after
+  the decision up to and including the first dip. "If" is one minus the chance of no dip on
+  any later day, and "when" is the chance each day is the first dip.
+- **Baseline:** the training frequency of a first dip for each (decision lead, later day) pair.
+- **Tuning:** leaves (7, 15, 31) and rounds (100, 200, 400) on the same two time-ordered folds
+  as the buy-or-wait model. The score is the mean of the "if" and "when" log-loss gains over
+  the baseline.
+- **Test:** the same split date as the buy-or-wait model. Intervals resample departure dates.
+- **Pass mark** (set before `dip-final` was run): the 95% interval for the log-loss gain over
+  the baseline stays above 0 for both "if" and "when", and in every one of ten equal-sized
+  bins the predicted chance of a dip is within 5 points of the observed share.
+
+| File (`reports/dip_model/`) | Contents |
+|---|---|
+| `tuning.csv` | Log-loss gains per setting and fold |
+| `summary.csv` | Final metrics for the model and baseline, with intervals on the gains |
+| `calibration.csv`, `calibration.png` | Predicted and observed chance of a dip in ten bins |
+| `by_lead.csv` | The "if" forecast at each decision lead |
+| `feature_importance.csv` | Share of LightGBM gain per input |
+| `setup.json` | Split date, thresholds, chosen setting, counts and the pass-mark check |
+
+**Result: did not pass.** Tuning chose 31 leaves and 100 rounds. On the final test (9,040 trips,
+39 departure dates, 251,163 decisions) the model beat the baseline but its probabilities were
+far too high:
+
+| Test metric | Model | Baseline | Gain (95% CI) |
+|---|---|---|---|
+| "If" log loss | 0.596 | 0.622 | 0.027 (0.003 to 0.051) |
+| "When" log loss | 1.261 | 1.287 | 0.026 (0.002 to 0.051) |
+| "If" AUC | 0.771 | 0.677 | |
+| "When" hit in top 5 days | 66.4% | 66.0% | 0.3 points (-0.1 to 0.7) |
+
+Both log-loss gains are above 0, but the calibration condition fails: the model's predicted
+chance of a dip is above the observed share in all ten bins, by 3 to 30 points (the baseline's
+gaps are 5 to 21). The model ranks decisions well but gets the level wrong, and it doesn't
+place the day better than the baseline.
+
+The cause is a lower dip rate in the test period. 44.5% of training decisions saw a catchable
+dip, with 42% to 47% in each of May, June and July departures. In the test, which covers
+departures from late August to early October, it was 28.6%. The tuning folds sit right after the
+training data and showed a gain of 0.14 in log loss, against 0.03 on the test. One summer of
+data can't separate a seasonal change from drift, so the model needs more than one season of
+quotes to be tested for it.
+
+### Walk-forward recalibration
+
+Can a weekly correction of the probability level fix the over-prediction? `dip-walk` replays 13
+Mondays from 2022-06-06 to 2022-08-29 and scores the week after each. **This is development
+evidence, not a test:** the replay covers the period the final test used, and it was run once
+with settings fixed in advance.
+
+```bash
+.venv/Scripts/python -I -m ticket_prices.cli dip-walk
+```
+
+It needs `dip-tune` to have run, and writes to `reports/dip_model/walk_forward/` (`summary.csv`,
+`by_week.csv`, `calibration.csv`, `calibration.png`, `setup.json`).
+
+Each Monday `W`, using only quotes before it:
+
+1. The model and the baseline are refitted on trips that finished before `W`.
+2. A correction `logit(h') = a + b * logit(h)` is fitted by logistic regression on trips still
+   being shopped for. It uses the days whose outcome became known in the last 28 days (also tried
+   with 14), predicted by the model just fitted. A day's outcome is known on the next quoted day,
+   because the catchable test needs that day's price. The correction is either a shift (`b = 1`)
+   or a shift and scale, and the baseline gets the same treatment.
+3. Decisions made in `[W, W+7)` are scored on their full outcome.
+
+`tests/test_dip_walk.py` rewrites every quote dated on or after `W` and checks that the rows and
+labels used for recalibration don't change.
+
+**Result: the success criteria were not met.** They were set in advance: pooled over the 13 weeks,
+the predicted chance in every one of ten bins within 5 points of the observed share, and the
+interval for the log-loss gain over the equally corrected baseline above 0. On 540,319 scored
+decisions:
+
+| Variant | "If" log loss (model / baseline) | "If" gain (95% CI) | Largest calibration gap |
+|---|---|---|---|
+| Weekly refit only | 0.494 / 0.623 | 0.129 (0.113 to 0.143) | 9.6 points |
+| Shift, 28 days (headline) | 0.500 / 0.616 | 0.116 (0.103 to 0.127) | 16.1 points |
+| Shift and scale, 28 days | 0.495 / 0.617 | 0.122 (0.108 to 0.135) | 14.6 points |
+| Shift and scale, 14 days | 0.492 / 0.615 | 0.123 (0.110 to 0.135) | 13.5 points |
+
+The "when" gains match these (0.12 to 0.13), and the model's AUC is 0.83 against 0.68. The weekly
+refit alone narrows the calibration gap from the final test's 30 points, but not to 5, and
+recalibration makes the pooled result no better:
+
+- **The model's edge fades in August.** Its "if" log-loss gain over the baseline is 0.15 to 0.20
+  in each week from June 6 to August 1, then 0.085, 0.017, 0.004 and 0.014 in the last four weeks.
+  The observed dip rate fell from 52% to about 28% over the same weeks, while the raw model kept
+  predicting about 40%.
+- **Recalibration helps late and hurts early.** In the last four weeks the corrected model beats
+  the raw one (log loss 0.516 to 0.538 against 0.529 to 0.593), but in June and July it is worse,
+  for example 0.593 against 0.489 in the week of June 27. Fitted shifts were positive (up to +0.64)
+  until July and only turned negative in August (down to -0.44).
+- **Why it lags.** Trips still being shopped for have only their far-lead outcomes known, so the
+  window mostly measures far-lead hazards. Near-lead hazards fell first. At the July 25 refit
+  the window rows were calibrated (predicted 0.067 against 0.069 observed at 20 to 30 days ahead),
+  while in the scored week the model over-predicted rows within 10 days (0.030 against 0.016).
+  By August 22 the drift was visible in the window too, and the correction turned negative. A single
+  shift is also too coarse, because the drift differs by days ahead.
+- **Window length makes no difference.** The 14-day and 28-day versions are within 0.001 to 0.002.
+
+### Lagged recalibration
+
+The first replay corrected from trips still being shopped for, which show only far-lead outcomes.
+`dip-walk-lag` corrects from trips that have already departed, which show outcomes at every lead.
+Each Monday `W` the model and baseline are fitted on trips that departed on or before `W - lag`,
+and the correction is fitted on trips that departed in `(W - lag, W]`, which the model never saw.
+It is one shift for each band of days to departure (1-7, 8-14, 15-21, 22-29), and a band with
+under 100 dips or non-dips takes the all-rows shift. It replays 9 Mondays from 2022-07-04 to
+2022-08-29 (401,674 scored decisions) and writes to `reports/dip_model/walk_lagged/`. **This is
+development evidence, a second look at weeks the earlier replay and the final test already used.**
+
+```bash
+.venv/Scripts/python -I -m ticket_prices.cli dip-walk-lag
+```
+
+**Result: the success criteria were not met.** They were set in advance for the headline variant
+(`lag28_band`): every one of ten calibration bins within 5 points, a log-loss gain over the equally
+corrected baseline with an interval above 0, and a gain over the plain weekly refit with an
+interval above 0. It met the second only:
+
+| Variant | "If" log loss | Gain over baseline (95% CI) | Gain over weekly refit (95% CI) | Largest calibration gap |
+|---|---|---|---|---|
+| `refit` (trained to `W`) | 0.498 | 0.119 (0.098 to 0.137) | | 13.6 points |
+| `lag28_raw` | 0.526 | 0.105 (0.086 to 0.122) | -0.028 (-0.031 to -0.024) | 15.0 points |
+| `lag28_shift` | 0.524 | 0.086 (0.068 to 0.102) | -0.026 (-0.033 to -0.019) | 15.9 points |
+| `lag28_band` (headline) | 0.513 | 0.094 (0.077 to 0.109) | -0.015 (-0.021 to -0.008) | 16.2 points |
+| `lag14_band` | 0.499 | 0.100 (0.085 to 0.113) | -0.001 (-0.009 to +0.008) | 14.2 points |
+
+- **The bands see the near-lead drift.** The 1-7 day shift is negative in every week and grows
+  from -0.15 to -0.88 (28-day lag), while the 15-29 day shifts were positive in July (up to
+  +0.67). A single shift averages these out, which is why `lag28_shift` is worse than `lag28_band`.
+- **The lag costs more than the correction recovers.** Training 28 days behind makes the model
+  0.028 worse than the weekly refit, and the band shifts win back about half of that. With a
+  14-day lag the correction recovers all of the cost, tying the refit ("if" gain -0.001),
+  with a small gain on the "when" forecast (0.009, CI 0.001 to 0.017).
+- **It helps in August and hurts in July, as before.** `lag14_band` beats the refit in each of
+  the last four weeks by 0.011 to 0.061 in log loss, and is worse in July (0.483 against 0.459 in the
+  week of July 4).
+- **Calibration still fails by 14 to 16 points.** The dip rate was falling by departure date, and
+  the scored trips depart 1 to 30 days after `W`, while the correction comes from trips that
+  departed up to 28 days before it, so it trails the drift by about a month. In the week of
+  August 1, 23% of decisions saw a dip while every variant predicted 38% to 39%.
+
 ## Tests
 
 ```bash

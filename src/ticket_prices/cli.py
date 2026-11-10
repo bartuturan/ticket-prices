@@ -27,6 +27,26 @@ from ticket_prices.dips import (
     wide_curves,
     write_summary,
 )
+from ticket_prices.dip_model import (
+    build_decisions,
+    choose_setting,
+    final_dip_test,
+    plot_calibration,
+    tune_dip_model,
+)
+from ticket_prices.dip_walk import (
+    DAY_BANDS,
+    HEADLINE,
+    HEADLINE_LAG,
+    LAG_START,
+    WALK_END,
+    WALK_START,
+    WINDOWS,
+    summarize_lagged,
+    summarize_walk,
+    walk_forward,
+    walk_forward_lagged,
+)
 from ticket_prices.evaluate import bad_case_check, choose, feature_importance, final_test, tune
 from ticket_prices.features import build_panel
 from ticket_prices.prepare import EXCLUDED_AIRLINES, build_daily_series, convert_csv
@@ -233,14 +253,190 @@ def final_step(args: argparse.Namespace) -> None:
     print(result["delayed_summary"].round(3).to_string())
 
 
+DIP_MODEL = REPORTS / "dip_model"
+
+
+def dip_model_inputs(args: argparse.Namespace):
+    cfg = replace(Config(), start_lead=args.start_lead, end_lead=args.end_lead)
+    dip_cfg = DipConfig(min_drop_pct=args.min_drop_pct, min_drop_abs=args.min_drop_abs)
+    curves = trip_curves(load_series(series_path(args)), cfg)
+    decisions = build_decisions(read_parquet(series_path(args, "panel")), curves, cfg)
+    return cfg, dip_cfg, curves, decisions
+
+
+def dip_tune_step(args: argparse.Namespace) -> None:
+    cfg, dip_cfg, curves, decisions = dip_model_inputs(args)
+    tuning = tune_dip_model(curves, decisions, cfg, dip_cfg, progress=lambda message: print(message, flush=True))
+    DIP_MODEL.mkdir(parents=True, exist_ok=True)
+    tuning.to_csv(DIP_MODEL / "tuning.csv", index=False)
+    print(tuning.groupby(["num_leaves", "rounds"])[["if_gain", "when_gain", "score"]].mean().round(4).to_string())
+    print("Chosen:", choose_setting(tuning).to_dict())
+
+
+def dip_final_step(args: argparse.Namespace) -> None:
+    summary_path = DIP_MODEL / "summary.csv"
+    if summary_path.exists() and not args.allow_rerun:
+        raise SystemExit(
+            f"{summary_path} exists. The final test is meant to run once: rerunning it after "
+            "seeing results makes it a tuning set. Use --allow-rerun only for a deliberate rerun."
+        )
+    cfg, dip_cfg, curves, decisions = dip_model_inputs(args)
+    tuning = pd.read_csv(DIP_MODEL / "tuning.csv")
+    if not ((tuning["min_drop_pct"] == dip_cfg.min_drop_pct) & (tuning["min_drop_abs"] == dip_cfg.min_drop_abs)).all():
+        raise SystemExit("tuning.csv used other dip thresholds than --min-drop-pct and --min-drop-abs. Run dip-tune again.")
+    chosen = choose_setting(tuning)
+    split = pd.Timestamp(args.split_date) if args.split_date else default_split_date(load_series(series_path(args)))
+
+    result = final_dip_test(curves, decisions, split, cfg, dip_cfg, int(chosen["num_leaves"]), int(chosen["rounds"]))
+    result["summary"].to_csv(summary_path)
+    result["calibration"].to_csv(DIP_MODEL / "calibration.csv")
+    result["by_lead"].to_csv(DIP_MODEL / "by_lead.csv")
+    result["importance"].to_csv(DIP_MODEL / "feature_importance.csv")
+    plot_calibration(
+        result["calibration"].loc["model"], result["calibration"].loc["baseline"], DIP_MODEL / "calibration.png"
+    )
+    setup = {
+        "split_date": str(split.date()),
+        "start_lead": cfg.start_lead,
+        "end_lead": cfg.end_lead,
+        "min_drop_pct": dip_cfg.min_drop_pct,
+        "min_drop_abs": dip_cfg.min_drop_abs,
+        "num_leaves": int(chosen["num_leaves"]),
+        "rounds": int(chosen["rounds"]),
+        "tuning_score": float(chosen["mean"]),
+        **result["counts"],
+        "pass_mark": result["pass_mark"],
+    }
+    (DIP_MODEL / "setup.json").write_text(json.dumps(setup, indent=2))
+    print(json.dumps(setup, indent=2))
+    print(result["summary"].round(4).to_string())
+    print(result["calibration"].round(3).to_string())
+
+
+def dip_walk_step(args: argparse.Namespace) -> None:
+    """Replay the Expedia period week by week, refitting and recalibrating. Not a final test."""
+    cfg, dip_cfg, curves, decisions = dip_model_inputs(args)
+    tuning = pd.read_csv(DIP_MODEL / "tuning.csv")
+    if not ((tuning["min_drop_pct"] == dip_cfg.min_drop_pct) & (tuning["min_drop_abs"] == dip_cfg.min_drop_abs)).all():
+        raise SystemExit("tuning.csv used other dip thresholds than --min-drop-pct and --min-drop-abs. Run dip-tune again.")
+    chosen = choose_setting(tuning)
+    weeks = pd.date_range(WALK_START, WALK_END, freq="7D")
+
+    result = walk_forward(
+        curves, decisions, weeks, cfg, dip_cfg, int(chosen["num_leaves"]), int(chosen["rounds"]),
+        progress=lambda message: print(message, flush=True),
+    )
+    summary = summarize_walk(result["scores"], dip_cfg)
+
+    out = DIP_MODEL / "walk_forward"
+    out.mkdir(parents=True, exist_ok=True)
+    result["weekly"].to_csv(out / "by_week.csv", index=False)
+    summary["summary"].to_csv(out / "summary.csv")
+    summary["calibration"].to_csv(out / "calibration.csv")
+    calibration = summary["calibration"]
+    plot_calibration(
+        calibration.loc[HEADLINE],
+        calibration.loc["raw"],
+        out / "calibration.png",
+        labels=(f"Recalibrated ({HEADLINE})", "Raw model"),
+        title="Calibration over the walk-forward weeks, ten equal-sized bins",
+    )
+    setup = {
+        "weeks": [str(week.date()) for week in weeks],
+        "windows": list(WINDOWS),
+        "headline_variant": HEADLINE,
+        "num_leaves": int(chosen["num_leaves"]),
+        "rounds": int(chosen["rounds"]),
+        "min_drop_pct": dip_cfg.min_drop_pct,
+        "min_drop_abs": dip_cfg.min_drop_abs,
+        "scored_decisions": int(len(result["scores"]["raw"]["model"])),
+        "evidence": "development: the replay covers the period the final dip-model test used",
+        "pass_mark": summary["pass_mark"],
+    }
+    (out / "setup.json").write_text(json.dumps(setup, indent=2))
+    print(json.dumps(setup, indent=2))
+    print(summary["summary"].round(4).to_string())
+    weekly = result["weekly"]
+    for variant in ("raw", HEADLINE):
+        part = weekly[weekly["variant"] == variant].assign(week=lambda frame: frame["week"].dt.date.astype(str))
+        print(f"\n{variant}")
+        print(
+            part[["week", "observed", "model_predicted", "baseline_predicted", "model_a", "model_b", "recalibration_rows"]]
+            .round(3)
+            .to_string(index=False)
+        )
+
+
+def dip_walk_lag_step(args: argparse.Namespace) -> None:
+    """Replay with a lagged refit corrected on recently departed trips, by days to departure. Not a final test."""
+    cfg, dip_cfg, curves, decisions = dip_model_inputs(args)
+    tuning = pd.read_csv(DIP_MODEL / "tuning.csv")
+    if not ((tuning["min_drop_pct"] == dip_cfg.min_drop_pct) & (tuning["min_drop_abs"] == dip_cfg.min_drop_abs)).all():
+        raise SystemExit("tuning.csv used other dip thresholds than --min-drop-pct and --min-drop-abs. Run dip-tune again.")
+    chosen = choose_setting(tuning)
+    weeks = pd.date_range(LAG_START, WALK_END, freq="7D")
+
+    result = walk_forward_lagged(
+        curves, decisions, weeks, cfg, dip_cfg, int(chosen["num_leaves"]), int(chosen["rounds"]),
+        progress=lambda message: print(message, flush=True),
+    )
+    summary = summarize_lagged(result["scores"], dip_cfg)
+
+    out = DIP_MODEL / "walk_lagged"
+    out.mkdir(parents=True, exist_ok=True)
+    result["weekly"].to_csv(out / "by_week.csv", index=False)
+    summary["summary"].to_csv(out / "summary.csv")
+    summary["vs_refit"].to_csv(out / "vs_refit.csv")
+    summary["calibration"].to_csv(out / "calibration.csv")
+    calibration = summary["calibration"]
+    plot_calibration(
+        calibration.loc[HEADLINE_LAG],
+        calibration.loc["refit"],
+        out / "calibration.png",
+        labels=(f"Lagged, by band ({HEADLINE_LAG})", "Weekly refit"),
+        title="Calibration over the lagged walk-forward weeks, ten equal-sized bins",
+    )
+    setup = {
+        "weeks": [str(week.date()) for week in weeks],
+        "variants": ["refit", "lag28_raw", "lag28_shift", "lag28_band", "lag14_band"],
+        "bands": [list(band) for band in DAY_BANDS],
+        "headline_variant": HEADLINE_LAG,
+        "num_leaves": int(chosen["num_leaves"]),
+        "rounds": int(chosen["rounds"]),
+        "min_drop_pct": dip_cfg.min_drop_pct,
+        "min_drop_abs": dip_cfg.min_drop_abs,
+        "scored_decisions": int(len(result["scores"]["refit"]["model"])),
+        "evidence": "development: a second look at weeks the earlier replay and the final test already used",
+        "pass_mark": summary["pass_mark"],
+    }
+    (out / "setup.json").write_text(json.dumps(setup, indent=2))
+    print(json.dumps(setup, indent=2))
+    print(summary["summary"].round(4).to_string())
+    print("\nAgainst the plain weekly refit (gain = refit loss minus this variant's loss)")
+    print(summary["vs_refit"].round(4).to_string())
+    weekly = result["weekly"]
+    shift_columns = [f"model_shift_{low}_{high}" for low, high in DAY_BANDS]
+    part = weekly[weekly["variant"] == HEADLINE_LAG].assign(week=lambda frame: frame["week"].dt.date.astype(str))
+    print(f"\n{HEADLINE_LAG}")
+    print(part[["week", "observed", "model_predicted", *shift_columns, "recalibration_rows"]].round(3).to_string(index=False))
+    for variant in ("refit", "lag28_raw"):
+        part = weekly[weekly["variant"] == variant].assign(week=lambda frame: frame["week"].dt.date.astype(str))
+        print(f"\n{variant}")
+        print(part[["week", "observed", "model_predicted", "model_if_log_loss", "baseline_if_log_loss"]].round(3).to_string(index=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "step", choices=["convert", "checks", "series", "backtest", "features", "tune", "final", "dips", "all"]
+        "step",
+        choices=[
+            "convert", "checks", "series", "backtest", "features", "tune", "final", "dips",
+            "dip-tune", "dip-final", "dip-walk", "dip-walk-lag", "all",
+        ],
     )
     parser.add_argument("--scraped-dir", default="germany-flight-fares/data", help="dips: scraper output folder")
-    parser.add_argument("--min-drop-pct", type=float, default=DipConfig.min_drop_pct, help="dips: smallest fall that counts")
-    parser.add_argument("--min-drop-abs", type=float, default=DipConfig.min_drop_abs, help="dips: smallest fall in currency units")
+    parser.add_argument("--min-drop-pct", type=float, default=DipConfig.min_drop_pct, help="dips, dip-tune, dip-final: smallest fall that counts")
+    parser.add_argument("--min-drop-abs", type=float, default=DipConfig.min_drop_abs, help="dips, dip-tune, dip-final: smallest fall in currency units")
     parser.add_argument("--start-lead", type=int, default=Config.start_lead)
     parser.add_argument("--end-lead", type=int, default=Config.end_lead)
     parser.add_argument("--split-date", help="YYYY-MM-DD; default is 60%% through the search dates")
@@ -266,6 +462,14 @@ def main() -> None:
         final_step(args)
     if args.step == "dips":
         dips_step(args)
+    if args.step == "dip-tune":
+        dip_tune_step(args)
+    if args.step == "dip-final":
+        dip_final_step(args)
+    if args.step == "dip-walk":
+        dip_walk_step(args)
+    if args.step == "dip-walk-lag":
+        dip_walk_lag_step(args)
 
 
 if __name__ == "__main__":

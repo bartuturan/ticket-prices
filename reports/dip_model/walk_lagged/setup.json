@@ -1,0 +1,53 @@
+{
+  "weeks": [
+    "2022-07-04",
+    "2022-07-11",
+    "2022-07-18",
+    "2022-07-25",
+    "2022-08-01",
+    "2022-08-08",
+    "2022-08-15",
+    "2022-08-22",
+    "2022-08-29"
+  ],
+  "variants": [
+    "refit",
+    "lag28_raw",
+    "lag28_shift",
+    "lag28_band",
+    "lag14_band"
+  ],
+  "bands": [
+    [
+      1,
+      7
+    ],
+    [
+      8,
+      14
+    ],
+    [
+      15,
+      21
+    ],
+    [
+      22,
+      29
+    ]
+  ],
+  "headline_variant": "lag28_band",
+  "num_leaves": 31,
+  "rounds": 100,
+  "min_drop_pct": 0.05,
+  "min_drop_abs": 3.0,
+  "scored_decisions": 401674,
+  "evidence": "development: a second look at weeks the earlier replay and the final test already used",
+  "pass_mark": {
+    "if_log_loss_gain_ci_low": 0.07669913405675803,
+    "when_log_loss_gain_ci_low": 0.08529548739461776,
+    "max_calibration_gap": 0.16230643841697923,
+    "calibration_tolerance": 0.05,
+    "passed": false,
+    "vs_refit_if_log_loss_gain_ci_low": -0.02143369755741003
+  }
+}

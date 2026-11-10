@@ -1,0 +1,25 @@
+{
+  "split_date": "2022-07-28",
+  "start_lead": 30,
+  "end_lead": 1,
+  "min_drop_pct": 0.05,
+  "min_drop_abs": 3.0,
+  "num_leaves": 31,
+  "rounds": 100,
+  "tuning_score": 0.143681714099122,
+  "train_trips": 13199,
+  "test_trips": 9040,
+  "test_departure_dates": 39,
+  "train_decisions": 349728,
+  "test_decisions": 251163,
+  "train_hazard_rows": 5125552,
+  "test_hazard_rows": 3760147,
+  "test_dip_rate": 0.28572679893137126,
+  "pass_mark": {
+    "if_log_loss_gain_ci_low": 0.0027465374158635748,
+    "when_log_loss_gain_ci_low": 0.002185324158590218,
+    "max_calibration_gap": 0.3043308871745087,
+    "calibration_tolerance": 0.05,
+    "passed": false
+  }
+}
