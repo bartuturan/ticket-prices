@@ -1,0 +1,58 @@
+{
+  "min_drop_pct": 0.05,
+  "min_drop_abs": 3.0,
+  "expedia": {
+    "departures_in_curves": 28841,
+    "final_window": "7-1 days out",
+    "dip_rate_by_window": {
+      "7-1 days out": 0.2766,
+      "14-8 days out": 0.3278,
+      "21-15 days out": 0.4326,
+      "30-24 days out": 0.4101
+    },
+    "departures_by_window": {
+      "7-1 days out": 27427,
+      "14-8 days out": 26945,
+      "21-15 days out": 25230,
+      "30-24 days out": 23970
+    }
+  },
+  "ryanair": {
+    "departures_in_curves": 4738,
+    "final_window": "6-1 days out",
+    "dip_rate_by_window": {
+      "6-1 days out": 0.1516,
+      "16-11 days out": 0.2964,
+      "31-26 days out": 0.3795,
+      "45-40 days out": 0.4832
+    },
+    "departures_by_window": {
+      "6-1 days out": 277,
+      "16-11 days out": 253,
+      "31-26 days out": 303,
+      "45-40 days out": 358
+    },
+    "snapshot_dates": [
+      "2026-11-04",
+      "2026-11-05",
+      "2026-11-06",
+      "2026-11-07",
+      "2026-11-08",
+      "2026-11-09"
+    ],
+    "missing_at_lead_1": {
+      "departures_due": 597,
+      "missing_at_end_lead": 3,
+      "share_missing": 0.005025125628140704
+    },
+    "same_flight_dip_rate_by_window": {
+      "6-1 days out": 0.1487,
+      "16-11 days out": 0.2829,
+      "31-26 days out": 0.375,
+      "45-40 days out": 0.49
+    }
+  },
+  "google_flights": {
+    "departures_tracked_to_lead_1": 5
+  }
+}

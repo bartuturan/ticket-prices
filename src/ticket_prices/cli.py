@@ -17,9 +17,20 @@ from ticket_prices.backtest import (
 )
 from ticket_prices.checks import run_checks
 from ticket_prices.curves import booking_curve, booking_curve_by_route, plot_booking_curve
+from ticket_prices.dips import (
+    TRIP_KEYS,
+    DipConfig,
+    analyse_dataset,
+    dip_rates,
+    google_cases,
+    late_dips,
+    wide_curves,
+    write_summary,
+)
 from ticket_prices.evaluate import bad_case_check, choose, feature_importance, final_test, tune
 from ticket_prices.features import build_panel
 from ticket_prices.prepare import EXCLUDED_AIRLINES, build_daily_series, convert_csv
+from ticket_prices.scraped import daily_series, load_scraped_fares, missing_last_quote, same_flight_only
 
 CSV = Path("data/raw/itineraries.csv")
 ITINERARIES = Path("data/processed/itineraries.parquet")
@@ -36,8 +47,17 @@ def series_path(args: argparse.Namespace, prefix: str = "daily_cheapest") -> Pat
     return Path("data/processed") / f"{'_'.join(parts)}.parquet"
 
 
+def read_parquet(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path)
+    except ImportError:  # pyarrow can't load where Windows Application Control blocks its DLL
+        import duckdb
+
+        return duckdb.connect().execute("SELECT * FROM read_parquet(?)", [str(path)]).df()
+
+
 def load_series(path: Path) -> pd.DataFrame:
-    series = pd.read_parquet(path)
+    series = read_parquet(path)
     for column in ("flightDate", "searchDate"):
         series[column] = pd.to_datetime(series[column])
     return series
@@ -94,6 +114,59 @@ def backtest_step(args: argparse.Namespace) -> None:
     print(f"Split {split.date()}: {len(train):,} train trips, {len(test):,} test trips")
     print(f"Best fixed lead from training: {leads['overall']} days")
     print(summary.round(3).to_string())
+
+
+EXPEDIA_WINDOWS = {"7-1 days out": (7, 1), "14-8 days out": (14, 8), "21-15 days out": (21, 15), "30-24 days out": (30, 24)}
+RYANAIR_WINDOWS = {"6-1 days out": (6, 1), "16-11 days out": (16, 11), "31-26 days out": (31, 26), "45-40 days out": (45, 40)}
+RYANAIR_MIN_QUOTES = 4  # of the 6 days in a window: the scraper has only about a week of snapshots
+
+
+def dips_step(args: argparse.Namespace) -> None:
+    """Do fares dip near departure? Expedia 2022 and the scraped Germany fares, side by side."""
+    out_dir = REPORTS / "dips"
+    cfg = DipConfig(min_drop_pct=args.min_drop_pct, min_drop_abs=args.min_drop_abs)
+    summary: dict = {"min_drop_pct": cfg.min_drop_pct, "min_drop_abs": cfg.min_drop_abs}
+
+    # Expedia: trips quoted on every day from 30 days out to 1 day out, so all windows share trips.
+    expedia = trip_curves(load_series(series_path(args)), Config(start_lead=30, end_lead=1))
+    summary["expedia"] = analyse_dataset(
+        "expedia", expedia, EXPEDIA_WINDOWS, cfg, expedia.index.get_level_values("flightDate"), out_dir
+    )
+
+    # Ryanair: groups are routes, because only a few departure dates have a full window.
+    fares = load_scraped_fares(Path(args.scraped_dir), "ryanair", skip_legacy=True)
+    series = daily_series(fares)
+    curves = wide_curves(series, int(series["days_to_departure"].max()))
+    route = curves.index.get_level_values("origin") + "-" + curves.index.get_level_values("destination")
+    summary["ryanair"] = analyse_dataset(
+        "ryanair", curves, RYANAIR_WINDOWS, cfg, route, out_dir, min_obs=RYANAIR_MIN_QUOTES
+    )
+    summary["ryanair"]["snapshot_dates"] = [str(d.date()) for d in sorted(series["searchDate"].unique())]
+    summary["ryanair"]["missing_at_lead_1"] = missing_last_quote(series)
+
+    # The same check on quotes that stay on one flight number.
+    same = same_flight_only(series)
+    same_curves = wide_curves(same, int(same["days_to_departure"].max()))
+    same_route = same_curves.index.get_level_values("origin") + "-" + same_curves.index.get_level_values("destination")
+    same_rates = dip_rates(same_curves, RYANAIR_WINDOWS, cfg, same_route, RYANAIR_MIN_QUOTES)
+    same_rates.to_csv(out_dir / "ryanair_same_flight_dip_rates.csv")
+    summary["ryanair"]["same_flight_dip_rate_by_window"] = {
+        w: round(float(r), 4) for w, r in same_rates["dip_rate"].items()
+    }
+
+    final = late_dips(curves, RYANAIR_WINDOWS["6-1 days out"], cfg, RYANAIR_MIN_QUOTES)
+    final = final[final["eligible"]].reset_index()
+    by_origin = final.groupby("origin").agg(departures=("dipped", "size"), dip_rate=("dipped", "mean"))
+    by_origin.to_csv(out_dir / "ryanair_dip_rates_by_origin.csv")
+
+    google = load_scraped_fares(Path(args.scraped_dir), "google_flights")
+    paths, spread = google_cases(google)
+    paths.to_csv(out_dir / "google_flights_cases.csv", index=False)
+    spread.to_csv(out_dir / "google_flights_intraday_spread.csv")
+    summary["google_flights"] = {"departures_tracked_to_lead_1": int(paths[TRIP_KEYS].drop_duplicates().shape[0])}
+
+    write_summary(summary, out_dir / "dips_summary.json")
+    print(json.dumps(summary, indent=2, default=str))
 
 
 def features_step(args: argparse.Namespace) -> None:
@@ -163,8 +236,11 @@ def final_step(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "step", choices=["convert", "checks", "series", "backtest", "features", "tune", "final", "all"]
+        "step", choices=["convert", "checks", "series", "backtest", "features", "tune", "final", "dips", "all"]
     )
+    parser.add_argument("--scraped-dir", default="germany-flight-fares/data", help="dips: scraper output folder")
+    parser.add_argument("--min-drop-pct", type=float, default=DipConfig.min_drop_pct, help="dips: smallest fall that counts")
+    parser.add_argument("--min-drop-abs", type=float, default=DipConfig.min_drop_abs, help="dips: smallest fall in currency units")
     parser.add_argument("--start-lead", type=int, default=Config.start_lead)
     parser.add_argument("--end-lead", type=int, default=Config.end_lead)
     parser.add_argument("--split-date", help="YYYY-MM-DD; default is 60%% through the search dates")
@@ -188,6 +264,8 @@ def main() -> None:
         tune_step(args)
     if args.step == "final":
         final_step(args)
+    if args.step == "dips":
+        dips_step(args)
 
 
 if __name__ == "__main__":
